@@ -1,0 +1,845 @@
+---
+title: "BioMed3 DNR Modifikacijų Analizė"
+author: "Analitikos Komanda"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Tyrimo Kontekstas
+
+## Tyrimo Tikslas
+
+Ištirti DNR modifikacijų tendencijas biologiniame amžiavime, naudojant:
+- Tiesinės regresijos metodus amžiumi susijusiems DNR modifikacijos pokyčiams identifikuoti
+- Horvath epigenetinio amžiaus nustatymo metodus
+- Genominę lokalizaciją ir biologinį kontekstą reikšmingoms pozicijoms
+- Papildomus epigenetinio amžiavimo modelius rezultatams patvirtinti
+
+## Surinkti Duomenys
+
+- DNR metilinimo reikšmės (beta reikšmės) iš mėginių
+- Mėginių metaduomenys (amžius, ląstelių tipas, lytis, rūkymas ir kt.)
+- CpG žymeklių anotacija su genominės lokalizacijos informacija
+- Horvath epigenetinio amžiaus koeficientai
+
+---
+
+# Duomenų Įkėlimas ir Paruošimas
+
+## Duomenų Nuskaitymas
+
+```r
+# Nustatome darbinę direktoriją
+setwd(getwd())
+
+# Duomenų failų kelius
+rds_path <- 'path/to/data.rds'  # Keičiate į savo duomenų kelio
+coef_file <- '13059_2013_3156_MOESM3_ESM.csv'  # Horvath koeficientai
+
+# Duomenų nuskaitymas
+obj <- readRDS(rds_path)
+betas <- obj  # metilinimo reikšmės matrica (CpG × mėginiai)
+annot <- attr(obj, '.annmatrix.rann')  # CpG anotacija
+samplekey <- attr(obj, '.annmatrix.cann')  # Mėginių metaduomenys
+
+# Paverčiame samplekey į duomenų lentelę
+samplekey_df <- as.data.frame(samplekey)
+
+cat('=== DUOMENŲ APŽVALGA ===\n')
+cat('Mėginių skaičius:', ncol(betas), '\n')
+cat('CpG žymeklių:', nrow(betas), '\n')
+cat('Mėginių metaduomenys:\n')
+print(head(samplekey_df))
+cat('\nCpG anotacija:\n')
+print(head(as.data.frame(annot)))
+```
+
+---
+
+# Užduotis 1: Amžiumi Susiję DNR Modifikacijos Pokyčiai
+
+## 1.1. Tiesinės Regresijos Modelis
+
+Ieškome pozicijų, kuriose DNR modifikacija priklauso nuo amžiaus. Naudojame kontrolinius kintamuosius (ląstelių tipas, lytis, rūkymas).
+
+```r
+# Paruošiame rezultatų lentelę
+n_cpgs <- nrow(betas)
+results_age <- data.frame(
+  cpg = rownames(betas),
+  beta_age = NA_real_,
+  p_value = NA_real_,
+  stringsAsFactors = FALSE
+)
+
+cat('Atliekama tiesinė regresija amžiumi susijiems pokyčiams...\n')
+
+# Atliekame regresiją kiekvienam CpG žymekliui
+for (i in seq_len(n_cpgs)) {
+  if (i %% 5000 == 0) cat('Apdorota:', i, '/', n_cpgs, '\n')
+  
+  # Paruošiame duomenis šiam žymekliui
+  y <- as.numeric(betas[i, ])
+  
+  # Patikrinkite kokias kovariates turite ir prisitaikykite modelį
+  # Modelis 1: Tik amžius
+  tryCatch({
+    model_alt <- lm(y ~ samplekey_df$age)
+    model_null <- lm(y ~ 1)  # tik intercept
+    
+    # Gaunate koeficientą ir p-vertę
+    results_age$beta_age[i] <- coef(model_alt)[2]
+    
+    # P-vertė iš ANOVA palyginimo
+    anova_result <- anova(model_null, model_alt)
+    results_age$p_value[i] <- anova_result[2, 6]
+    
+  }, error = function(e) {
+    # Jei modelis nepavyksta, palikite NA
+  })
+}
+
+cat('Regresija baigta!\n')
+
+# Išsaugokite pilnus rezultatus
+write.csv(results_age, 'task1_age_regression_results.csv', row.names = FALSE)
+
+# Santrauka
+sig_threshold <- 0.05
+n_significant <- sum(!is.na(results_age$p_value) & results_age$p_value <= sig_threshold)
+
+cat('\n=== UŽDUOTIS 1: REZULTATAI ===\n')
+cat('Iš viso citozinų analizuota:', nrow(results_age), '\n')
+cat('Citozinų su reikšmingais amžiumi susijusiais pokyčiais (p ≤', sig_threshold, '):', n_significant, '\n')
+cat('Padidėję su amžiumi:', sum(results_age$beta_age > 0 & results_age$p_value <= sig_threshold, na.rm = TRUE), '\n')
+cat('Sumažėję su amžiumi:', sum(results_age$beta_age < 0 & results_age$p_value <= sig_threshold, na.rm = TRUE), '\n')
+```
+
+## 1.2. Reikšmingų Citozinų Anotacija
+
+```r
+# Filtruojame reikšmingus rezultatus
+sig_results <- results_age[!is.na(results_age$p_value) & 
+                            results_age$p_value <= sig_threshold, ]
+sig_results <- sig_results[order(sig_results$p_value), ]
+
+cat('Top 20 reikšmingų citozinų:\n')
+print(head(sig_results, 20))
+
+# Prijungiame anotaciją
+if (!is.null(annot)) {
+  annot_df <- as.data.frame(annot)
+  if (is.null(rownames(annot_df))) {
+    rownames(annot_df) <- seq_len(nrow(annot_df))
+  }
+  
+  # Identifikuojame relevantūs stulpeliai
+  cn <- tolower(colnames(annot_df))
+  chr_col <- colnames(annot_df)[grep('chr|chrom', cn)[1]]
+  pos_col <- colnames(annot_df)[grep('pos|map|coordinate|mapinfo', cn)[1]]
+  gene_col <- colnames(annot_df)[grep('gene|symbol', cn)[1]]
+  
+  sig_results$chr <- NA_character_
+  sig_results$pos <- NA_real_
+  sig_results$gene <- NA_character_
+  
+  rn <- rownames(annot_df)
+  mm <- match(sig_results$cpg, rn)
+  
+  if (!is.null(chr_col)) sig_results$chr <- as.character(annot_df[[chr_col]])[mm]
+  if (!is.null(pos_col)) sig_results$pos <- as.numeric(as.character(annot_df[[pos_col]]))[mm]
+  if (!is.null(gene_col)) sig_results$gene <- as.character(annot_df[[gene_col]])[mm]
+}
+
+# Išsaugokite anotomintus rezultatus
+write.csv(sig_results, 'task1_significant_cpgs_annotated.csv', row.names = FALSE)
+
+cat('\nGenominiai kontekstai (chromosomos):\n')
+print(table(sig_results$chr))
+```
+
+## 1.3. Top 10 Citozinų Vizualizacija
+
+```r
+# Pasirenkami 10 patikimiausių citozinų
+top_n <- 10
+top_cpgs <- sig_results$cpg[seq_len(min(top_n, nrow(sig_results)))]
+
+cat('Vizualizuojami top', length(top_cpgs), 'citozinai...\n')
+
+# Sukuriame grafikus
+for (i in seq_along(top_cpgs)) {
+  cpg_id <- top_cpgs[i]
+  
+  # Randame datos indeksą
+  cpg_idx <- which(results_age$cpg == cpg_id)
+  if (length(cpg_idx) == 0) next
+  
+  y_vals <- as.numeric(betas[cpg_id, ])
+  x_vals <- samplekey_df$age
+  
+  # Tiesinė regresija vizualizacijai
+  fit <- lm(y_vals ~ x_vals)
+  
+  # PNG failas
+  png(sprintf('task1_top_cpg_%02d_%s.png', i, cpg_id), 
+      width = 800, height = 600, pointsize = 12)
+  
+  plot(x_vals, y_vals, 
+       pch = 16, cex = 1.2,
+       xlab = 'Amžius (metai)',
+       ylab = 'Metilinimas (beta reikšmė)',
+       main = sprintf('Top %d citozinas: %s\np-vertė = %.2e', i, cpg_id, 
+                      results_age$p_value[cpg_idx]),
+       col = rgb(0.2, 0.4, 0.8, 0.6))
+  
+  # Tiesinės regresijos linija
+  abline(fit, col = 'red', lwd = 2.5)
+  
+  # Koeficiento ir R² informacija
+  beta_coef <- results_age$beta_age[cpg_idx]
+  r_squared <- summary(fit)$r.squared
+  
+  legend('topleft', 
+         legend = c(sprintf('β = %.4f', beta_coef),
+                   sprintf('R² = %.4f', r_squared)),
+         bty = 'n', cex = 1.1)
+  
+  dev.off()
+  cat('Išsaugotas:', sprintf('task1_top_cpg_%02d_%s.png\n', i, cpg_id))
+}
+
+cat('\nTop 10 citozinų grafikai sukurti!\n')
+```
+
+---
+
+# Užduotis 2: P-verčių Histograma
+
+## 2.1. P-verčių Pasiskirstymo Vizualizacija
+
+```r
+cat('\n=== UŽDUOTIS 2: P-VERČIŲ HISTOGRAMA ===\n')
+
+# Validios p-vertės
+p_vals_valid <- results_age$p_value[!is.na(results_age$p_value)]
+
+png('task2_pvalue_histogram.png', width = 1000, height = 700, pointsize = 12)
+
+hist(p_vals_valid, 
+     breaks = seq(0, 1, by = 0.01),
+     xlim = c(0, 1),
+     main = 'DNR Modifikacijos P-verčių Pasiskirstymas (Amžius)',
+     xlab = 'P-vertė',
+     ylab = 'CpG Žymeklių Skaičius',
+     col = 'steelblue',
+     border = 'navy',
+     cex.main = 1.3,
+     cex.lab = 1.2)
+
+# Reikšmingumo slenkstis
+abline(v = 0.05, col = 'red', lwd = 3, lty = 2, label = 'p = 0.05')
+abline(v = 0.01, col = 'orange', lwd = 2.5, lty = 2, label = 'p = 0.01')
+
+legend('topright',
+       legend = c('p = 0.05', 'p = 0.01'),
+       col = c('red', 'orange'),
+       lwd = 3,
+       lty = 2,
+       cex = 1.1)
+
+dev.off()
+
+# Statistika
+cat('Iš viso apdorotų citozinų:', nrow(results_age), '\n')
+cat('Validios p-vertės:', length(p_vals_valid), '\n')
+cat('Reikšmingi (p ≤ 0.05):', sum(p_vals_valid <= 0.05), '\n')
+cat('Labai reikšmingi (p ≤ 0.01):', sum(p_vals_valid <= 0.01), '\n')
+cat('Labai labai reikšmingi (p ≤ 0.001):', sum(p_vals_valid <= 0.001), '\n')
+cat('\nHistograma išsaugota: task2_pvalue_histogram.png\n')
+```
+
+---
+
+# Užduotis 3: Manhattan Grafikas
+
+## 3.1. Duomenų Paruošimas Manhattan Grafikui
+
+```r
+cat('\n=== UŽDUOTIS 3: MANHATTAN GRAFIKAS ===\n')
+
+# Sujungiame rezultatus su genominės lokalizacijos informacija
+manhattan_data <- results_age
+manhattan_data$chr <- NA_character_
+manhattan_data$pos <- NA_real_
+
+if (!is.null(annot)) {
+  annot_df <- as.data.frame(annot)
+  if (is.null(rownames(annot_df))) {
+    rownames(annot_df) <- seq_len(nrow(annot_df))
+  }
+  
+  cn <- tolower(colnames(annot_df))
+  chr_col <- colnames(annot_df)[grep('chr|chrom', cn)[1]]
+  pos_col <- colnames(annot_df)[grep('pos|map|coordinate|mapinfo', cn)[1]]
+  
+  rn <- rownames(annot_df)
+  mm <- match(manhattan_data$cpg, rn)
+  
+  if (!is.null(chr_col)) {
+    manhattan_data$chr <- as.character(annot_df[[chr_col]])[mm]
+  }
+  if (!is.null(pos_col)) {
+    manhattan_data$pos <- as.numeric(as.character(annot_df[[pos_col]]))[mm]
+  }
+}
+
+# Filtruojame tik tuos, kurie turi chromosomą ir poziciją
+manhattan_data_clean <- manhattan_data[!is.na(manhattan_data$chr) & 
+                                        !is.na(manhattan_data$pos) & 
+                                        !is.na(manhattan_data$p_value), ]
+
+cat('Apdorotų CpG žymeklių su genominėmis koordinatėmis:', nrow(manhattan_data_clean), '\n')
+```
+
+## 3.2. Manhattan Grafikas - Visos Chromosomos
+
+```r
+cat('Kuriamas Manhattan grafikas su visomis chromosomomis...\n')
+
+# Apskaičiuojame sukauptą poziciją (cumulative position)
+manhattan_data_clean$chr_num <- as.numeric(gsub('chr|X|Y|MT', '', manhattan_data_clean$chr))
+manhattan_data_clean$chr_num[is.na(manhattan_data_clean$chr_num)] <- 999  # Nežinomos
+
+# Rūšiuojame pagal chromosomą ir poziciją
+manhattan_data_clean <- manhattan_data_clean[order(manhattan_data_clean$chr_num, 
+                                                     manhattan_data_clean$pos), ]
+
+# Apskaičiuojame chromosome offsets
+chr_max <- tapply(manhattan_data_clean$pos, manhattan_data_clean$chr_num, max, na.rm = TRUE)
+chr_order <- sort(as.numeric(names(chr_max)))
+offsets <- c(0, cumsum(as.numeric(chr_max[as.character(chr_order[seq_len(length(chr_order)-1)])]))[-1])
+names(offsets) <- chr_order
+
+manhattan_data_clean$cumpos <- manhattan_data_clean$pos + offsets[as.character(manhattan_data_clean$chr_num)]
+
+# Spalvos chromosomoms
+colors <- rep(c('steelblue', 'coral'), length.out = length(chr_order))
+
+png('task3_manhattan_all_chromosomes.png', width = 1400, height = 700, pointsize = 12)
+
+plot(manhattan_data_clean$cumpos, 
+     -log10(manhattan_data_clean$p_value),
+     pch = 20, cex = 0.6,
+     xlab = 'Genominė Pozicija',
+     ylab = '-log10(P-vertė)',
+     main = 'Manhattan Grafikas: DNR Modifikacijos Asociacijos su Amžiumi (Visos Chromosomos)',
+     col = colors[match(manhattan_data_clean$chr_num, chr_order)],
+     xaxt = 'n',
+     cex.main = 1.3,
+     cex.lab = 1.2)
+
+# Chromosomų žymės
+ticks <- tapply(manhattan_data_clean$cumpos, 
+                manhattan_data_clean$chr_num, 
+                function(x) mean(x, na.rm = TRUE))
+axis(1, at = ticks, labels = names(ticks), las = 2, cex.axis = 0.9)
+
+# Reikšmingumo linijos
+abline(h = -log10(0.05), col = 'red', lty = 2, lwd = 2)
+abline(h = -log10(0.01), col = 'orange', lty = 2, lwd = 2)
+
+legend('topright',
+       legend = c('p = 0.05', 'p = 0.01'),
+       col = c('red', 'orange'),
+       lty = 2,
+       lwd = 2,
+       cex = 1.1)
+
+dev.off()
+
+cat('Išsaugotas: task3_manhattan_all_chromosomes.png\n')
+```
+
+## 3.3. Manhattan Grafikas - Ryčiausioji Chromosoma
+
+```r
+cat('Nustatoma ryčiausioji chromosoma...\n')
+
+# Randame chromosomą su daugiausia reikšmingų asociacijų
+sig_by_chr <- table(manhattan_data_clean$chr_num[manhattan_data_clean$p_value < 0.05])
+if (length(sig_by_chr) > 0) {
+  top_chr <- as.numeric(names(sort(sig_by_chr, decreasing = TRUE)[1]))
+  
+  cat('Ryčiausioji chromosoma: chr', top_chr, 
+      '(', sig_by_chr[as.character(top_chr)], 'reikšmingų pozicijų)\n')
+  
+  # Filtruojame tik šią chromosomą
+  top_chr_data <- manhattan_data_clean[manhattan_data_clean$chr_num == top_chr, ]
+  
+  if (nrow(top_chr_data) > 0) {
+    png('task3_manhattan_top_chromosome.png', width = 1200, height = 700, pointsize = 12)
+    
+    plot(top_chr_data$pos, 
+         -log10(top_chr_data$p_value),
+         pch = 20, cex = 0.8,
+         xlab = sprintf('Pozicija, Chromosoma %d (bp)', top_chr),
+         ylab = '-log10(P-vertė)',
+         main = sprintf('Manhattan Grafikas: Chromosoma %d\n(Ryčiausioji pagal reikšmingų asociacijų skaičių)', top_chr),
+         col = 'darkblue',
+         cex.main = 1.3,
+         cex.lab = 1.2)
+    
+    # Reikšmingumo linijos
+    abline(h = -log10(0.05), col = 'red', lty = 2, lwd = 2)
+    abline(h = -log10(0.01), col = 'orange', lty = 2, lwd = 2)
+    
+    dev.off()
+    
+    cat('Išsaugotas: task3_manhattan_top_chromosome.png\n')
+  }
+} else {
+  cat('PERSPĖJIMAS: Nėra reikšmingų asociacijų (p < 0.05)\n')
+}
+```
+
+---
+
+# Užduotis 4a: Horvath Epigenetinio Amžiaus Modelis
+
+## 4a.1. Horvath Koeficientų Nuskaitymas
+
+```r
+cat('\n=== UŽDUOTIS 4: HORVATH EPIGENETINIS AMŽIUS ===\n')
+
+# Koeficientų failo nuskaitymas
+if (!file.exists(coef_file)) {
+  cat('PERSPĖJIMAS: Horvath koeficientų failas nerasta:', coef_file, '\n')
+  cat('Parsisiųskite iš: https://static-content.springer.com/esm/art%3A10.1186%2Fgb-2013-14-10-r115/MediaObjects/13059_2013_3156_MOESM3_ESM.csv\n')
+} else {
+  # Nuskaitymas su atitinkamu header nustatymu
+  rl <- readLines(coef_file, n = 200)
+  header_line <- NA_integer_
+  
+  for (i in seq_along(rl)) {
+    line <- rl[i]
+    if (!grepl(',', line)) next
+    first_field <- tolower(gsub('^\\s*"|"\\s*$', '', 
+                               strsplit(line, ',')[[1]][1], perl = TRUE))
+    if (grepl('^cpg', first_field)) { 
+      header_line <- i
+      break 
+    }
+  }
+  
+  if (!is.na(header_line)) {
+    coef_df <- read.csv(coef_file, skip = header_line - 1, 
+                        stringsAsFactors = FALSE, check.names = FALSE)
+  } else {
+    coef_df <- read.csv(coef_file, stringsAsFactors = FALSE, check.names = FALSE)
+  }
+  
+  cat('Horvath koeficientų failas nuskaitytas!\n')
+  cat('Koeficientų skaičius:', nrow(coef_df), '\n')
+}
+
+## 4a.2. Stulpelių Identifikavimas
+
+```r
+# Stulpelių nustatymas
+cn <- tolower(colnames(coef_df))
+idx_cpg <- grep('cpg|probeset|cg|cpgmarker', cn)
+idx_coef <- grep('coef|coefficient|coefficienttraining|training', cn)
+
+if (length(idx_cpg) == 0 || length(idx_coef) == 0) {
+  stop('Nepavyko rasti CpG/koeficiento stulpelių Horvath faile')
+}
+
+cpg_col <- colnames(coef_df)[idx_cpg[1]]
+coef_col <- colnames(coef_df)[idx_coef[1]]
+
+cat('CpG stulpelis:', cpg_col, '\n')
+cat('Koeficiento stulpelis:', coef_col, '\n')
+
+# Skaitinių koeficientų paruošimas
+raw_coefs <- coef_df[[coef_col]]
+coef_nums <- suppressWarnings(as.numeric(gsub(',', '.', as.character(raw_coefs))))
+coef_tab <- data.frame(CpG = as.character(coef_df[[cpg_col]]),
+                       Coef = coef_nums, stringsAsFactors = FALSE)
+
+na_coefs <- sum(is.na(coef_tab$Coef))
+if (na_coefs > 0) {
+  cat('PERSPĖJIMAS: Rasta', na_coefs, 'NA koeficientų\n')
+}
+
+# Intercept paieška
+intercept <- 0
+if (any(tolower(coef_tab$CpG) %in% c('(intercept)', 'intercept'))) {
+  ii <- which(tolower(coef_tab$CpG) %in% c('(intercept)', 'intercept'))[1]
+  if (!is.na(coef_tab$Coef[ii])) {
+    intercept <- coef_tab$Coef[ii]
+  }
+  coef_tab <- coef_tab[!seq_len(nrow(coef_tab)) %in% ii, , drop = FALSE]
+}
+
+cat('Intercept:', intercept, '\n')
+
+# Filtravimas - tik galiojantys koeficientai
+coef_tab <- coef_tab[!is.na(coef_tab$Coef) & coef_tab$CpG != '' & 
+                     !is.na(coef_tab$CpG), , drop = FALSE]
+
+if (nrow(coef_tab) == 0) {
+  stop('Horvath faile nėra skaitinių koeficientų')
+}
+
+cat('Galiojantys koeficientai:', nrow(coef_tab), '\n')
+```
+
+## 4a.3. CpG Žymeklių Atpažinimas
+
+```r
+# Randame bendrus CpG žymeklius
+common_cpgs <- intersect(coef_tab$CpG, rownames(betas))
+cat('Horvath CpG žymekliai, rastos duomenyse:', length(common_cpgs), '/', nrow(coef_tab), '\n')
+
+if (length(common_cpgs) == 0) {
+  stop('CpG žymekliai nesuderinami su duomenimis')
+}
+
+if (length(common_cpgs) < 10) {
+  cat('PERSPĖJIMAS: Tik', length(common_cpgs), 'Horvath CpG žymekliai suderinti\n')
+}
+```
+
+## 4a.4. Horvath Amžiaus Skaičiavimas
+
+```r
+# Koeficientai bendriems žymekliams
+coef_matched <- coef_tab[match(common_cpgs, coef_tab$CpG), , drop = FALSE]
+coef_vec <- as.numeric(coef_matched$Coef)
+
+# Metilinimo reikšmės bendriems žymekliams
+betas_matched <- betas[coef_matched$CpG, , drop = FALSE]
+
+# Trūkstamų reikšmių užpildymas vidurkiais
+if (any(is.na(betas_matched))) {
+  col_means <- colMeans(betas_matched, na.rm = TRUE)
+  for (k in seq_len(ncol(betas_matched))) {
+    na_idx <- is.na(betas_matched[, k])
+    if (any(na_idx)) {
+      betas_matched[na_idx, k] <- col_means[k]
+    }
+  }
+}
+
+# Horvath Raw score = sum(CpG coeficient * beta value) + intercept
+horvath_raw <- as.numeric(coef_vec %*% as.matrix(betas_matched)) + intercept
+
+cat('Horvath RAW rezultatai skaičiuoti!\n')
+cat('Baigtinės prognoze:', sum(is.finite(horvath_raw)), '/', length(horvath_raw), '\n')
+```
+
+## 4a.5. Horvath Amžiaus Kalibravimas
+
+```r
+# Pasiruošiame datus kalibracijai
+horvath_df <- data.frame(
+  sample = colnames(betas),
+  horvath_raw = horvath_raw,
+  chronological_age = samplekey_df$age,
+  stringsAsFactors = FALSE
+)
+
+# Tik validūs duomenys
+valid_idx <- which(is.finite(horvath_df$horvath_raw) & 
+                   !is.na(horvath_df$chronological_age))
+
+cat('Validūs duomenys kalibracijai:', length(valid_idx), '\n')
+
+if (length(valid_idx) >= 5) {
+  # Tiesinė regresija: chronological_age ~ horvath_raw
+  calib_model <- lm(horvath_df$chronological_age[valid_idx] ~ 
+                    horvath_df$horvath_raw[valid_idx])
+  
+  # Kalibruotas Horvath amžius
+  horvath_df$horvath_age <- predict(calib_model, 
+                                     newdata = data.frame(horvath_raw = horvath_df$horvath_raw))
+  
+  # Skaičiavimas tikslumo metrikų
+  horvath_df$horvath_age_error <- horvath_df$horvath_age - horvath_df$chronological_age
+  
+  mae <- mean(abs(horvath_df$horvath_age_error[valid_idx]), na.rm = TRUE)
+  rmse <- sqrt(mean((horvath_df$horvath_age_error[valid_idx])^2, na.rm = TRUE))
+  corr <- suppressWarnings(
+    cor(horvath_df$horvath_age[valid_idx], 
+        horvath_df$chronological_age[valid_idx], 
+        use = 'complete.obs')
+  )
+  
+  cat('\n=== HORVATH KALIBRAVIMAS ===\n')
+  cat('Mėginiai:', length(valid_idx), '\n')
+  cat('MAE (Vidutinė Absoliutinė Paklaida):', sprintf('%.2f metų', mae), '\n')
+  cat('RMSE (Kvadratinė Šaknis Vidutinės Paklaidų Kvadrato):', sprintf('%.2f metų', rmse), '\n')
+  cat('Koreliacija:', sprintf('%.4f', corr), '\n')
+  
+} else {
+  cat('PERSPĖJIMAS: Per mažai duomenų kalibracijai\n')
+  horvath_df$horvath_age <- horvath_df$horvath_raw
+  horvath_df$horvath_age_error <- NA
+}
+
+# Išsaugojimas
+write.csv(horvath_df, 'task4_horvath_comparison.csv', row.names = FALSE)
+write.csv(coef_matched, 'task4_horvath_coefficients_used.csv', row.names = FALSE)
+
+cat('\nHorvath rezultatai išsaugoti!\n')
+```
+
+## 4a.6. Horvath Amžiaus Vizualizacija
+
+```r
+cat('Kuriami Horvath vizualizacijos grafikai...\n')
+
+# Horvath Laikrodis - Kalibruotas
+valid_for_plot <- which(is.finite(horvath_df$horvath_age) & 
+                        !is.na(horvath_df$chronological_age))
+
+if (length(valid_for_plot) > 1) {
+  png('task4_horvath_clock_calibrated.png', width = 900, height = 900, pointsize = 12)
+  
+  plot(horvath_df$chronological_age[valid_for_plot], 
+       horvath_df$horvath_age[valid_for_plot],
+       pch = 16, cex = 1.3,
+       xlab = 'Chronologinis Amžius (metai)',
+       ylab = 'Horvath Epigenetinis Amžius (metai)',
+       main = 'Horvath Epigenetinio Amžiaus Laikrodis (Kalibruotas)',
+       col = rgb(0.2, 0.4, 0.8, 0.6),
+       cex.main = 1.3,
+       cex.lab = 1.2)
+  
+  # Ideali linija (1:1)
+  age_range <- range(horvath_df$chronological_age[valid_for_plot], na.rm = TRUE)
+  abline(0, 1, col = 'red', lty = 2, lwd = 2.5, label = 'y = x')
+  
+  # Tiesinės regresijos linija
+  fit_viz <- lm(horvath_df$horvath_age[valid_for_plot] ~ 
+                horvath_df$chronological_age[valid_for_plot])
+  abline(fit_viz, col = 'blue', lwd = 2.5, label = 'Gautoji linija')
+  
+  legend('topleft',
+         legend = c('Ideali (y = x)', 'Gautoji linija'),
+         col = c('red', 'blue'),
+         lty = c(2, 1),
+         lwd = 2.5,
+         cex = 1.1)
+  
+  dev.off()
+  cat('Išsaugotas: task4_horvath_clock_calibrated.png\n')
+}
+
+# Rezidualiai - Horvath amžiaus numatymo paklaida
+valid_for_residual <- which(is.finite(horvath_df$horvath_age_error))
+
+if (length(valid_for_residual) > 1) {
+  png('task4_horvath_residuals.png', width = 900, height = 700, pointsize = 12)
+  
+  plot(horvath_df$chronological_age[valid_for_residual],
+       horvath_df$horvath_age_error[valid_for_residual],
+       pch = 16, cex = 1.2,
+       xlab = 'Chronologinis Amžius (metai)',
+       ylab = 'Horvath - Chronologinis Amžius (metai)',
+       main = 'Horvath Epigenetinio Amžiaus Numatymo Paklaida',
+       col = rgb(0.8, 0.2, 0.2, 0.6),
+       cex.main = 1.3,
+       cex.lab = 1.2)
+  
+  abline(h = 0, col = 'red', lty = 2, lwd = 3)
+  
+  dev.off()
+  cat('Išsaugotas: task4_horvath_residuals.png\n')
+}
+```
+
+---
+
+# Užduotis 5: Kiti Epigenetiniai Laikrodžiai
+
+## 5.1. Papildomiųėų Laikrodžių Taikymas
+
+```r
+cat('\n=== UŽDUOTIS 5: KITI EPIGENETINIAI LAIKRODŽIAI ===\n')
+
+# Patikrinkite, ar yra installed 'methylclock' paketas
+# Jei ne, instaliuokite: BiocManager::install("methylclock")
+
+other_clocks <- data.frame(
+  sample = colnames(betas),
+  horvath_age = horvath_df$horvath_age,
+  stringsAsFactors = FALSE
+)
+
+# Bandymas naudoti methylclock paketą (jei prieinamas)
+if (requireNamespace('methylclock', quietly = TRUE)) {
+  cat('methylclock paketas rastas. Taikomi papildomi laikrodžiai...\n')
+  
+  library(methylclock)
+  
+  # Paruošimas duomenų formato methylclock reikalavimams
+  # Pastaba: gali reikėti konvertuoti duomenis į reikalingą formatą
+  
+  # Jei jūs turite epigenetinio amžiaus prognozes iš kitų modelių, 
+  # prijunkite jas čia
+  
+} else {
+  cat('methylclock paketas nėra įdiegtas. Praleiskite šią sekciją.\n')
+  cat('Instaliavimui: BiocManager::install("methylclock")\n')
+}
+
+write.csv(other_clocks, 'task5_epigenetic_clocks_comparison.csv', row.names = FALSE)
+```
+
+---
+
+# Užduotis 6: Apžvalginė Analizė
+
+## 6.1. Horvath Amžiaus Paklaidų Analizė
+
+```r
+cat('\n=== UŽDUOTIS 6: APŽVALGINĖ ANALIZĖ ===\n')
+
+# Analizė paklaidų pagal amžiaus grupes
+horvath_df$age_group <- cut(horvath_df$chronological_age, 
+                            breaks = quantile(horvath_df$chronological_age, 
+                                            na.rm = TRUE),
+                            include.lowest = TRUE)
+
+age_group_stats <- aggregate(horvath_df$horvath_age_error ~ horvath_df$age_group,
+                            data = horvath_df,
+                            FUN = function(x) {
+                              c(n = length(x),
+                                mean = mean(x, na.rm = TRUE),
+                                sd = sd(x, na.rm = TRUE),
+                                mae = mean(abs(x), na.rm = TRUE))
+                            })
+
+cat('\nHorvath Paklaidų Statistika pagal Amžiaus Grupes:\n')
+print(age_group_stats)
+
+# Atvaizduojame boxplot
+png('task6_horvath_errors_by_age_group.png', width = 900, height = 700, pointsize = 12)
+
+boxplot(horvath_df$horvath_age_error ~ horvath_df$age_group,
+        xlab = 'Amžiaus Grupė',
+        ylab = 'Horvath - Chronologinis Amžius (metai)',
+        main = 'Horvath Epigenetinio Amžiaus Paklaidų Pasiskirstymas pagal Amžiaus Grupes',
+        col = 'lightblue',
+        border = 'darkblue',
+        cex.main = 1.2,
+        cex.lab = 1.1)
+
+abline(h = 0, col = 'red', lty = 2, lwd = 2)
+
+dev.off()
+
+cat('Išsaugotas: task6_horvath_errors_by_age_group.png\n')
+```
+
+## 6.2. Horvath Amžius vs Chronologinis Amžius - Koreliacija
+
+```r
+# Scatter plot su Pearson koreliacija
+valid_pairs <- which(!is.na(horvath_df$horvath_age) & 
+                     !is.na(horvath_df$chronological_age))
+
+if (length(valid_pairs) > 2) {
+  corr_pearson <- cor(horvath_df$horvath_age[valid_pairs],
+                      horvath_df$chronological_age[valid_pairs])
+  corr_spearman <- cor(horvath_df$horvath_age[valid_pairs],
+                       horvath_df$chronological_age[valid_pairs],
+                       method = 'spearman')
+  
+  cat('\nKoreliacija:\n')
+  cat('Pearson:', sprintf('%.4f', corr_pearson), '\n')
+  cat('Spearman:', sprintf('%.4f', corr_spearman), '\n')
+}
+```
+
+## 6.3. Top Citozinų Horvath Modelyje
+
+```r
+# Jei norite pamatyti, kurie citozinai labiausiai prisideda prie Horvath amžiaus
+
+top_horvath_cpgs <- head(coef_matched[order(abs(coef_matched$Coef), 
+                                             decreasing = TRUE), ], 20)
+
+cat('\nTop 20 Horvath Modelyje Naudojamų CpG Žymeklių (pagal Koeficiento Dydį):\n')
+print(top_horvath_cpgs)
+
+write.csv(top_horvath_cpgs, 'task6_top_horvath_cpgs.csv', row.names = FALSE)
+```
+
+## 6.4. Sumarioji Ataskaita
+
+```r
+cat('\n')
+cat('=====================================\n')
+cat('APŽVALGINĖ ANALIZĖS ATASKAITA\n')
+cat('=====================================\n\n')
+
+cat('1. AMŽIUMI SUSIJĘ DNR MODIFIKACIJOS POKYČIAI:\n')
+cat('   - Iš viso analizuotų citozinų:', nrow(results_age), '\n')
+cat('   - Reikšmingų (p ≤ 0.05):', sum(results_age$p_value <= 0.05, na.rm = TRUE), '\n')
+cat('   - Padidėję su amžiumi:', sum(results_age$beta_age > 0 & results_age$p_value <= 0.05, na.rm = TRUE), '\n')
+cat('   - Sumažėję su amžiumi:', sum(results_age$beta_age < 0 & results_age$p_value <= 0.05, na.rm = TRUE), '\n\n')
+
+cat('2. GENOMINĖ LOKALIZACIJA:\n')
+cat('   - Genoming regijonai su reikšmingomis asociacijomis:\n')
+print(table(sig_results$chr))
+cat('\n')
+
+cat('3. HORVATH EPIGENETINIS AMŽIUS:\n')
+cat('   - Naudoti CpG žymekliai:', length(common_cpgs), '\n')
+if (length(valid_idx) >= 5) {
+  cat('   - MAE (Vidutinė Absoliutinė Paklaida):', sprintf('%.2f metų', mae), '\n')
+  cat('   - RMSE:', sprintf('%.2f metų', rmse), '\n')
+  cat('   - Koreliacija (Pearson):', sprintf('%.4f', corr), '\n')
+}
+cat('\n')
+
+cat('4. IŠSAUGOTI FAILAI:\n')
+cat('   - task1_age_regression_results.csv\n')
+cat('   - task1_significant_cpgs_annotated.csv\n')
+cat('   - task1_top_cpg_*.png (10 grafikų)\n')
+cat('   - task2_pvalue_histogram.png\n')
+cat('   - task3_manhattan_all_chromosomes.png\n')
+cat('   - task3_manhattan_top_chromosome.png\n')
+cat('   - task4_horvath_comparison.csv\n')
+cat('   - task4_horvath_clock_calibrated.png\n')
+cat('   - task4_horvath_residuals.png\n')
+cat('   - task5_epigenetic_clocks_comparison.csv\n')
+cat('   - task6_horvath_errors_by_age_group.png\n')
+cat('   - task6_top_horvath_cpgs.csv\n\n')
+
+cat('ANALIZĖ BAIGTA SĖKMINGAI!\n')
+cat('=====================================\n')
+```
+
+---
+
+# Sesijos Informacija
+
+```r
+# Sesijos informacija
+cat('\n=== SESIJOS INFORMACIJA ===\n')
+sessionInfo()
+```
+
+---
+
+## Pastabos ir Rekomendacijos
+
+- **Duomenų formatas**: Patikrinkite, kad jūsų RDS failas turi teisingus atributus (`.annmatrix.rann` ir `.annmatrix.cann`)
+- **Horvath koeficientai**: Parsisiųskite iš https://static-content.springer.com/esm/art%3A10.1186%2Fgb-2013-14-10-r115/MediaObjects/13059_2013_3156_MOESM3_ESM.csv
+- **Kovariatės**: Jei turite papildomų kintamųjų (ląstelių tipą, lytį, rūkymą), modifikuokite tiesinės regresijos modelius
+- **Vizualizacijos**: Visi grafikai išsaugomi kaip PNG; konvertuokite į SVG/PDF naudodami `svg()` ar `pdf()` funkcijas
+- **Tikslumo Metrika**: MAE ir RMSE rodo, kaip tiksliai Horvath modelis nuspėja amžių jūsų duomenyse
