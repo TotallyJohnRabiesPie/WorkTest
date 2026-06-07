@@ -1,0 +1,65 @@
+---
+title: "Dvorkin duomenų rinkinio analizė"
+author: "Meda_Klapatauskaite, Margiris_Malakauskas"
+date: "2026-04-05"
+output: html_document
+---
+
+# Tyrimo kontekstas
+
+
+Tyrimo tikslas – ištirti ankstyvus genominius atsakus žmogaus adaptacijoje prie hipoksijos aukštikalnėse, analizuojant diferencinę genų raišką ir DNR metilinimo pokyčius.
+
+## Surinkti duomenys
+
+Transkriptominiai ir epigenominiai raiškos duomenys iš 21 donorų per 16 dienų. Kraujo mėginiai iš tų pačių donorų skirtingais laiko momentais.  
+
+## Eksperimento dizainas
+
+- Tiriamieji: 21 jaunų vyrų ir moterų
+- Longitudiniai matavimai: tie patys tyriamieji stebimi pakartotinai skirtingomis sąlygomis
+- Sąlygos: kopimas į aukštikalnę (hypoxia) ir grįžimas į normalias sąlygas (normoxia)
+- Palyginimai: kiekvieno individo pokyčiai lyginami su jo paties pradine būsena
+
+## Naudotos analizės
+
+- Diferencinės genų raiškos analizė
+- Diferencinio DNR metilinimo analizė
+- Taip pat analizuota, ar identifikuoti genai priklauso žinomiems hipoksijos atsako keliams ir pakitimų išliekamumas.
+
+## Rezultatai
+
+Nustatyta 6350 diferencijuotai išreikštų genų, dalis aktyvuoti (upregulated), dalis slopinti (downregulated).
+Skirtingos grupės: ankstyvi, vėlyvi ir nuolatiniai pokyčiai
+Aptikti DNR metilinimo pokyčiai, genų raiškos pakitimai atitiko žinomus hipoksijos atsako genus (pvz., HIF, VEGF ir kt.)
+
+7-16 tyrimo dienomis: 
+- 3557 diferencijuotai išreikšti genai (48 %/52 % padidėjusi/sumažėjusi raiška) buvo nustatyti tik 7 dieną (ankstyvieji) 
+- 1418 - tiek 7, tiek 16 dieną (40 %/60 %)
+- 1375 - tik 16 dieną (vėlyvieji; 44 %/56 %).
+
+
+16-ą dieną pastėbėti ryškųs fiziologiniai pakitimai palyginti su 1-ą tyrimo diena: 
+- padidėjo SaO₂% rodiklis,
+- pagerėjusios kognityvinės funkcijos ir submaksimalaus krūvio pakantumas
+- visiškai apsisaugota nuo aukštikalnių ligos
+Dauguma šių pagerėjimų išliko ir po 7 dienų normoksijoje.
+
+
+---
+
+# Duomenų įkėlimas ir analizė
+
+data	metilinimo reikšmės (CpG × mėginiai)
+cann	informacija apie mėginius
+rann	informacija apie CpG vietas
+
+Mėginių skaičius: 108
+
+```r
+data <- readRDS("dvorkin.rds")
+meth <- data
+
+cann <- attr(data, ".annmatrix.cann")
+rann <- attr(data, ".annmatrix.rann")
+```
